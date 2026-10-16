@@ -1,0 +1,53 @@
+api/
+└── <feature>/v1/                     # Proto contracts EXPOSED by this service (server)
+    ├── <feature>.proto
+    ├── <feature>.pb.go
+    └── <feature>_grpc.pb.go
+
+protoc/                               # Proto of VENDOR/OTHER services we consume (client)
+├── gen.sh                            # Local proto compile script
+└── <service>/v1/
+    ├── <service>.proto
+    ├── <service>.pb.go
+    └── <service>_grpc.pb.go
+
+domain/
+├── entity/                           # Pure business data, param spec structs, usecase result structs
+├── valueobject/                      # (Optional) Immutable value structs, validated on construction
+├── aggregate/                        # (Optional) Multi-entity transactional units with invariants
+├── event/                            # (Optional) Past-tense event payload structs
+├── gateway/                          # Port interfaces: <system>.go, repository.go, cache.go, event.go
+└── service/                          # Pure cross-entity rules (no I/O, DB, Redis, HTTP, config)
+
+application/
+├── usecase/                          # Single-Action Command Handler (1 file = 1 usecase = 1 Execute)
+└── service/                          # (Optional) Application services & adapters:
+                                      # - Transport adapter: translates HTTP/gRPC context (claims) into domain entities
+                                      # - Config adapter: maps infra *config.Config into domain value objects
+                                      # - Cross-usecase orchestration helpers (NO business rules, NO DB/API I/O)
+
+delivery/
+├── grpc/
+│   ├── handler/                      # Parse protobuf request → call usecase → return protobuf
+│   └── interceptor/                  # Recovery, ContextPropagator (support_id, co_order_id)
+├── http/
+│   ├── handler/                      # Per-feature handler files (<feature>_handler.go)
+│   ├── middleware/                   # Recovery, ContextPropagator, Auth
+│   └── route/                        # Per-feature routing files (<feature>_route.go) + handler interface
+└── {rmqp,kafka}/
+    └── consumer/                     # Per-feature consumers (<feature>_consumer.go)
+
+infrastructure/
+├── external/                         # Outbound adapters (surrounding HTTP & internal gRPC microservices)
+│   └── <system_name>/                # client.go, request.go, dto.go, mapper.go, cached_client.go
+├── persistence/                      # DB adapters: mysql/, postgres/ — implement domain/gateway repository ports
+├── security/                         # (Optional) Security & crypto adapters implementing domain/gateway
+│   └── <mechanism>/                  # ports (TokenSigner, Hasher, Encrypter). Wraps low-level libs
+│                                     # (jwt, bcrypt, aes) so usecases depend on the port, never the lib.
+└── <other_infra>/                    # (Optional) Any other outbound adapter: object storage, email, etc.
+
+pkg/                                  # Cross-cutting: config, logmanager, httpclient, grpc, httpserver, rmqp, kafka, mysql, utils
+cmd/
+├── apps/                             # Modular DI (app.go shared infra + wire_<feature>.go per feature)
+└── server/
+    └── main.go                       # Entrypoint: load config → BuildContainer → dual graceful shutdown
