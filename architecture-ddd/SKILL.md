@@ -6,7 +6,7 @@ description: Generic DDD & Clean Architecture guide (Eric Evans tactical pattern
 # Architecture DDD (Domain-Driven Design) — Universal Standard
 
 ## Overview
-This skill is a **generic, project-agnostic architecture contract** for Clean/Hexagonal Architecture (Ports & Adapters), enriched with **Eric Evans' tactical DDD patterns** (Entity, Value Object, Aggregate, Domain Event, Repository). Replace placeholders like `<system_name>`, `<feature_name>`, `<entity_name>`, `<Action>` with your actual domain names.
+This skill is a **generic, project-agnostic architecture contract** for Clean/Hexagonal Architecture (Ports & Adapters), enriched with **Eric Evans' tactical DDD patterns** (Entity, Value Object, Aggregate, Domain Event, Repository). Replace placeholders like `<system_name>`, `<feature>`, `<entity>`, `<Action>` with your actual domain names.
 
 ---
 
@@ -19,24 +19,28 @@ application/usecase                                  (Workflow Orchestration / A
         ↓
 domain/service                                       (Pure Business Rules — cross-aggregate logic)
         ↓
-domain/aggregate/  domain/entity/  domain/valueobject/  domain/event/  domain/gateway/
+domain/{aggregate, entity, valueobject, event, enum, exceptions, gateway}
         ↑ implemented by
-infrastructure/external/<system_name>, infrastructure/persistence/<db>   (Adapters)
+infrastructure/external/<system_name>, infrastructure/persistence/<db>, infrastructure/gateway/   (Adapters)
 ```
 
 **Golden Rules:**
 - `domain/entity` → Lowest layer. Zero imports from this repo.
-- `domain/valueobject` → Immutable value structs. Zero repo imports (can import `domain/entity` errors only).
-- `domain/aggregate` → Multi-entity transactional units. Imports only `domain/entity` + `domain/valueobject`.
-- `domain/event` → Business event payload structs. Imports only `domain/entity` (past-tense naming).
-- `domain/gateway` → Interface ports only. Imports only `domain/entity` (and `domain/event` for publisher ports).
-- `domain/service` → Pure rules. Imports only the layers above. NEVER import `os`, `viper`, `net/http`, `database/sql`, `pkg/config`.
-- `application/usecase` → Orchestrator. Imports `domain/*`, `pkg/logmanager`, and `application/service` adapters. NEVER import external DTOs or delivery packages.
+- `domain/valueobject` → Immutable value structs. Zero repo imports (can import `domain/entity` or `domain/exceptions` errors only, or stdlib).
+- `domain/enum` → Type-safe constants (feature flags, statuses). Zero repo imports.
+- `domain/exceptions` → Canonical domain error constants. Stdlib only (`errors`).
+- `domain/aggregate` → Multi-entity transactional units. Imports only `domain/entity`, `domain/valueobject`, and `domain/event`.
+- `domain/event` → Business event payload structs. Imports `domain/entity` and `domain/valueobject` (past-tense naming).
+- `domain/gateway` → Interface ports only. Imports `domain/entity`, `domain/valueobject`, `domain/enum`, and `domain/event` (for publisher ports).
+- `domain/service` → Pure rules. Imports only the domain layers above. NEVER import `os`, `viper`, `net/http`, `database/sql`, `pkg/config`.
+- `application/usecase` → Orchestrator. Imports `domain/*`, `pkg/logger`, and `application/service` adapters. NEVER import external DTOs, delivery packages, or `pkg/config` directly (use `application/service/ConfigAdapter`).
 - `application/service` → (Optional) Adapters only: transport claims → domain entity, config → domain value object, cross-usecase helpers. NO business rules, NO DB/API I/O, NO crypto libs.
 - `infrastructure/external` → Outbound adapters (HTTP/gRPC surrounding systems). Implements `domain/gateway` ports. NEVER import `application` or `delivery`.
 - `infrastructure/persistence` → DB adapters. Implements `domain/gateway` repository ports. NEVER import `application` or `delivery`.
+- `infrastructure/gateway` → Surrounding tool adapters (e.g. `growthbook.go` feature flags). Implements `domain/gateway` ports.
 - `infrastructure/security` → (Optional) Crypto/token adapters implementing `domain/gateway` ports (`TokenSigner`, `Hasher`). Wraps low-level libs (jwt, bcrypt, aes); usecases depend on the port, never the lib.
 - `infrastructure/**` (any other) → Same rule: implements a domain port, NEVER imports `application` or `delivery`.
+- `internal/**` → (Optional) Project-private legacy utilities, response mappers (`internal/helper/`), or aliases (`internal/exception/`). New code prefers `infrastructure/` and `domain/exceptions/`.
 - `delivery/**` → Inbound entry points. Parse transport payload → call `usecase.Execute()` → return transport response.
 - Reverse direction = cyclic import = FORBIDDEN.
 
@@ -47,7 +51,7 @@ infrastructure/external/<system_name>, infrastructure/persistence/<db>   (Adapte
 Full annotated structure: read `references/go-ddd-structure.md` (layer placement rules + import directions).
 Raw scaffold tree for copy-paste: `templates/domain-tree.txt`.
 
-Top-level layout: `api/` (exposed protos) · `protoc/` (consumed vendor protos) · `domain/` (entity, valueobject, aggregate, event, gateway, service) · `application/` (usecase, service) · `delivery/` (grpc, http, rmqp, kafka) · `infrastructure/` (external, persistence, security) · `pkg/` (cross-cutting) · `cmd/` (apps DI, server main).
+Top-level layout: `api/` (exposed protos) · `protoc/` (consumed vendor protos) · `domain/` (entity, valueobject, aggregate, event, enum, exceptions, gateway, service) · `application/` (usecase, service) · `delivery/` (grpc, http, rmqp, kafka) · `infrastructure/` (external, persistence, gateway, security) · `pkg/` (cross-cutting) · `internal/` (optional legacy utilities) · `cmd/` (apps DI, server main).
 
 ---
 
@@ -141,7 +145,7 @@ func (a *OrderAggregate) Cancel(reason string) error {
 Immutable records of **something important that happened in the domain**, named in past tense (`OrderCompleted`, `PaymentFailed`). Payload only — the delivery mechanism lives in `domain/gateway` (`EventPublisher`) and `infrastructure/external/{rmqp,kafka}`.
 
 ```go
-// domain/event/order_events.go
+// domain/event/order_completed.go
 package event
 
 import "time"
@@ -152,6 +156,13 @@ type OrderCompleted struct {
     TotalAmount int64     `json:"total_amount"`
     OccurredAt  time.Time `json:"occurred_at"`
 }
+```
+
+```go
+// domain/event/order_cancelled.go
+package event
+
+import "time"
 
 type OrderCancelled struct {
     OrderID    string    `json:"order_id"`
@@ -205,7 +216,7 @@ Every external integration (HTTP REST surrounding system or internal gRPC micros
 ```
 infrastructure/external/<system_name>/
 ├── client.go          # Struct, Constructor, compile check: var _ gateway.<System>Gateway = (*Client)(nil)
-├── request.go         # Transport logic: auth headers, retry, SegmentLog builder, status envelope extraction
+├── request.go         # Transport logic: auth headers, retry, structured log builder, status envelope extraction
 ├── dto.go             # 100% mirror of external JSON/proto contract (NEVER leaks outside this package)
 ├── mapper.go          # Anti-Corruption Layer: DTO -> domain entity mapper
 ├── <action>.go        # 1 method per endpoint (separate file if the file gets large)
@@ -287,7 +298,7 @@ func NewCachedClient(realClient gateway.<System>Gateway, cache gateway.CacheGate
 
 // Decorate READ methods only:
 func (c *CachedClient) Get<Entity>Detail(ctx context.Context, id string) (*entity.<Entity>, error) {
-    cacheKey := fmt.Sprintf("<system_name>:<entity_name>:%s", id)
+    cacheKey := fmt.Sprintf("<system_name>:<entity>:%s", id)
 
     if c.cache != nil {
         var cached entity.<Entity>
@@ -330,51 +341,53 @@ gatewayInstance := <system_name>.NewCachedClient(rawClient, cacheGateway, 5*time
 
 ## 6. Generic Single-Action Usecase (Command Handler)
 
-Every usecase follows: **1 file = 1 struct = 1 `Deps` struct = 1 `Execute()` method**.
+Every usecase follows: **1 file = 1 struct = 1 `Deps` struct = 1 `Execute()` method**, named `<feature>_<action>_usecase.go`.
 
 ```go
-// application/usecase/<action>_<feature>.go
+// application/usecase/<feature>_<action>_usecase.go
 package usecase
 
 import (
     "context"
     "<module>/domain/entity"
     "<module>/domain/gateway"
-    "<module>/pkg/logmanager"
+    "<module>/pkg/logger"
 )
 
-type <Action><Feature>Deps struct {
+type <Feature><Action>Deps struct {
+    Log             logger.Logger
     <System>Gateway gateway.<System>Gateway
     // OrderRepo gateway.<Feature>Repository
 }
 
-type <Action><Feature>Usecase struct {
-    deps <Action><Feature>Deps
+type <Feature><Action>Usecase struct {
+    deps <Feature><Action>Deps
 }
 
-func New<Action><Feature>Usecase(deps <Action><Feature>Deps) *<Action><Feature>Usecase {
-    return &<Action><Feature>Usecase{deps: deps}
+func New<Feature><Action>Usecase(deps <Feature><Action>Deps) *<Feature><Action>Usecase {
+    return &<Feature><Action>Usecase{deps: deps}
 }
 
-func (u *<Action><Feature>Usecase) Execute(ctx context.Context, param *entity.<Param>) (*entity.<Result>, error) {
-    seg := logmanager.NewSegmentLog(ctx, "USECASE_<ACTION>_<FEATURE>").
-        SetUsecase("<Action><Feature>Usecase").
-        SetParam(param)
+func (u *<Feature><Action>Usecase) Execute(ctx context.Context, param *entity.<Param>) (*entity.<Result>, error) {
+    u.deps.Log.Info("executing usecase", logger.Fields{
+        "usecase": "<Feature><Action>Usecase",
+        "param":   param,
+    })
 
     // 1. Validation
     if err := validateParam(param); err != nil {
-        seg.SetError(err, false).Send()
+        u.deps.Log.Error("validation failed", logger.Fields{"error": err.Error()})
         return nil, err
     }
 
     // 2. Gateway Orchestration
     res, err := u.deps.<System>Gateway.<Action>(ctx, param)
     if err != nil {
-        seg.SetError(err, false).Send()
+        u.deps.Log.Error("gateway call failed", logger.Fields{"error": err.Error()})
         return nil, err
     }
 
-    seg.SetResponse(res).Send()
+    u.deps.Log.Info("usecase succeeded", logger.Fields{"result": res})
     return res, nil
 }
 ```
@@ -420,9 +433,9 @@ Feature flags control **release workflows**, NOT business logic. Therefore, eval
 ```
 domain/enum/feature_flag.go        (Type-safe flag names)
         ↓
-domain/gateway/feature_flag.go     (Outbound port interface)
+domain/gateway/feature_flag_gateway.go (Outbound port interface)
         ↓ implemented by
-infrastructure/gateway/growthbook.go (or internal/repository/gateway/)
+infrastructure/gateway/growthbook.go (primary; legacy projects may use internal/ instead)
         ↓ consumed by
 application/usecase/               (Evaluates flag via port, branches flow)
 ```
@@ -461,7 +474,7 @@ type FeatureFlagGateway interface {
 ### 2. Usage in Usecase:
 
 ```go
-// application/usecase/<action>_<feature>.go
+// application/usecase/<feature>_<action>_usecase.go
 // Path whitelist MUST come from config via ConfigAdapter, NEVER hardcoded string in usecase!
 cfg := u.deps.ConfigAdapter.ToAppConfig()
 
@@ -560,12 +573,14 @@ All usecases, handlers, and gateways MUST follow the **Table-Driven Test** patte
 ### 1. Usecase Table-Driven Template:
 
 ```go
-// application/usecase/<feature>_usecase_test.go
+// application/usecase/<feature>_<action>_usecase_test.go
 package usecase
 
 import (
     "context"
     "testing"
+
+    "<module>/pkg/logger"
 
     "github.com/golang/mock/gomock"
     "github.com/stretchr/testify/assert"
@@ -573,26 +588,25 @@ import (
 
 // Minimal stub logger for zero-allocation test runs
 type stubLogger struct{}
-func (s *stubLogger) InitLogger()                                         {}
-func (s *stubLogger) Info(msg string, fields logger.Fields, path string)  {}
-func (s *stubLogger) Error(msg string, fields logger.Fields, path string) {}
-func (s *stubLogger) Warn(msg string, fields logger.Fields, path string)  {}
-func (s *stubLogger) Debug(msg string, fields logger.Fields, path string) {}
-func (s *stubLogger) Fatal(msg string, fields logger.Fields, path string) {}
-func (s *stubLogger) Panic(msg string, fields logger.Fields, path string) {}
+func (s *stubLogger) Info(msg string, fields logger.Fields)   {}
+func (s *stubLogger) Error(msg string, fields logger.Fields)  {}
+func (s *stubLogger) Warn(msg string, fields logger.Fields)   {}
+func (s *stubLogger) Debug(msg string, fields logger.Fields)  {}
+func (s *stubLogger) Fatal(msg string, fields logger.Fields)  {}
+func (s *stubLogger) Panic(msg string, fields logger.Fields)  {}
 
-func Test<Feature>Usecase_Execute(t *testing.T) {
+func Test<Feature><Action>Usecase_Execute(t *testing.T) {
     tests := []struct {
         name       string
         req        *entity.<Request>
-        mockSetup  func(deps <Feature>Deps)
+        mockSetup  func(deps <Feature><Action>Deps)
         wantResult func(t *testing.T, res *entity.<Result>)
         wantErr    string // or error for errors.Is comparison
     }{
         {
             name: "happy path - success",
             req:  validRequest(),
-            mockSetup: func(deps <Feature>Deps) {
+            mockSetup: func(deps <Feature><Action>Deps) {
                 deps.Gateway.(*mocks.MockGateway).EXPECT().
                     GetData(gomock.Any(), "id-123").
                     Return(expectedData, nil)
@@ -604,7 +618,7 @@ func Test<Feature>Usecase_Execute(t *testing.T) {
         {
             name: "gateway error - returns wrapped error",
             req:  validRequest(),
-            mockSetup: func(deps <Feature>Deps) {
+            mockSetup: func(deps <Feature><Action>Deps) {
                 deps.Gateway.(*mocks.MockGateway).EXPECT().
                     GetData(gomock.Any(), "id-123").
                     Return(nil, errors.New("upstream timeout"))
@@ -618,7 +632,7 @@ func Test<Feature>Usecase_Execute(t *testing.T) {
             ctrl := gomock.NewController(t)
             defer ctrl.Finish()
 
-            deps := <Feature>Deps{
+            deps := <Feature><Action>Deps{
                 Log:     &stubLogger{},
                 Gateway: mocks.NewMockGateway(ctrl),
             }
@@ -627,7 +641,7 @@ func Test<Feature>Usecase_Execute(t *testing.T) {
                 tt.mockSetup(deps)
             }
 
-            u := New<Feature>Usecase(deps)
+            u := New<Feature><Action>Usecase(deps)
             result, err := u.Execute(context.Background(), tt.req)
 
             if tt.wantErr != "" {
@@ -724,6 +738,7 @@ Wrap behind `domain/gateway/` when the dependency is **I/O-bound, non-determinis
 | **gRPC Client** (Link, Product) | Microservice network dependency | `gateway.ProductDetailer` |
 | **Message Broker** (RabbitMQ, Kafka) | I/O streaming | `gateway.EventPublisher` |
 | **Feature Flags** (GrowthBook) | Dynamic remote state | `gateway.FeatureFlagGateway` |
+| **Logging** (logrus, zap, slog, logmanager) | I/O + test isolation | `logger.Logger` (lives in `pkg/logger` — cross-cutting, not domain) |
 | **Crypto / Token Signing** (JWT, AES, bcrypt) | Test determinism & swappable algorithms | `gateway.TokenSigner`, `gateway.Hasher` |
 | **Time / Clock** *(if business-critical)* | Test time-travel without sleeping | `gateway.Clock` |
 
@@ -739,6 +754,7 @@ Direct import is preferred for **pure, stateless, deterministic computation**. W
 
 ### Go Idiom: Consumer-Owned Interfaces
 - Interfaces are defined **where they are consumed** (`domain/gateway/`), NOT where they are implemented (`pkg/` or `infrastructure/`).
+- **Exception (cross-cutting utilities):** Interfaces for technical infrastructure shared across all layers (`logger.Logger`) live in their respective `pkg/` package (`pkg/logger/`), NOT `domain/gateway/`. Backend adapters (logrus, zap, slog, logmanager) implement it in `pkg/logger/<backend>.go`.
 - Define only the methods the consumer actually calls (Interface Segregation Principle).
 - Single-method interfaces use `-er` suffix (`ProductDetailer`, `Encrypter`). Multi-method use descriptive names (`LinkService`).
 
@@ -755,7 +771,7 @@ Direct import is preferred for **pure, stateless, deterministic computation**. W
 
 ### What NEVER goes into `application/service/`:
 - **Business rules:** Calculations, discounts, domain transitions belong to `domain/service/` or `domain/aggregate/`.
-- **Database / API calls:** I/O operations belong to `infrastructure/` or `internal/repository/`.
+- **Database / API calls:** I/O operations belong to `infrastructure/` (legacy projects may use `internal/repository/`).
 - **External libraries / Crypto:** Belongs to `infrastructure/` implementing a `domain/gateway/` port.
 
 ---

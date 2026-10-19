@@ -15,12 +15,14 @@ domain/
 ├── entity/                           # Pure business data, param spec structs, usecase result structs
 ├── valueobject/                      # (Optional) Immutable value structs, validated on construction
 ├── aggregate/                        # (Optional) Multi-entity transactional units with invariants
-├── event/                            # (Optional) Past-tense event payload structs
-├── gateway/                          # Port interfaces: <system>.go, repository.go, cache.go, event.go
+├── event/                            # (Optional) Past-tense event payload structs (<entity>_<ActionPastTense>.go)
+├── enum/                             # (Optional) Type-safe domain enums (feature_flag.go, status.go)
+├── exceptions/                       # Canonical domain error constants (errors.go)
+├── gateway/                          # Port interfaces: <system>.go, repository.go, cache.go, event.go, feature_flag_gateway.go
 └── service/                          # Pure cross-entity rules (no I/O, DB, Redis, HTTP, config)
 
 application/
-├── usecase/                          # Single-Action Command Handler (1 file = 1 usecase = 1 Execute)
+├── usecase/                          # Single-Action Command Handler: <feature>_<action>_usecase.go (1 file = 1 usecase = 1 Execute)
 └── service/                          # (Optional) Application services & adapters:
                                       # - Transport adapter: translates HTTP/gRPC context (claims) into domain entities
                                       # - Config adapter: maps infra *config.Config into domain value objects
@@ -41,12 +43,19 @@ infrastructure/
 ├── external/                         # Outbound adapters (surrounding HTTP & internal gRPC microservices)
 │   └── <system_name>/                # client.go, request.go, dto.go, mapper.go, cached_client.go
 ├── persistence/                      # DB adapters: mysql/, postgres/ — implement domain/gateway repository ports
+├── gateway/                          # (Optional) Outbound tool adapters: growthbook.go (feature flags), metrics
 ├── security/                         # (Optional) Security & crypto adapters implementing domain/gateway
 │   └── <mechanism>/                  # ports (TokenSigner, Hasher, Encrypter). Wraps low-level libs
 │                                     # (jwt, bcrypt, aes) so usecases depend on the port, never the lib.
 └── <other_infra>/                    # (Optional) Any other outbound adapter: object storage, email, etc.
 
-pkg/                                  # Cross-cutting: config, logmanager, httpclient, grpc, httpserver, rmqp, kafka, mysql, utils
+internal/                             # (Optional) Project-private legacy utilities:
+├── exception/                        # Backward-compat aliases for domain/exceptions
+└── helper/                           # Response / status mappers (MapHttpStatusCode)
+
+pkg/                                  # Cross-cutting: config, logger (universal interface — backend pluggable:
+                                      # logrus/zap/slog/logmanager, developer's choice), httpclient, grpc,
+                                      # httpserver, rmqp, kafka, mysql, crypto, utils
 cmd/
 ├── apps/                             # Modular DI (app.go shared infra + wire_<feature>.go per feature)
 └── server/
